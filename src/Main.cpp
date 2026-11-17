@@ -344,13 +344,15 @@ namespace
 			if (q->IsCompleted()) {
 				completed.push_back(q);
 			}
-			if (!(q->IsRunning() || q->IsStarting() || q->IsStopping())) {
+			// running = the quest's Enabled flag (what Papyrus IsRunning reports); also list quests caught mid start/stop
+			if (!(q->IsEnabled() || q->IsStarting() || q->IsStopping())) {
 				continue;
 			}
 			o.L("--------------------------------------------------------------------------------");
 			o.L("QUEST " + Label(q));
-			o.L(std::format("  stage {} | running {} | starting {} | stopping {} | completed {} | active in journal {} | already run {} | type {}", q->GetCurrentStageID(),
-				q->IsRunning(), q->IsStarting(), q->IsStopping(), q->IsCompleted(), q->IsActive(), q->alreadyRun, static_cast<int>(q->GetType())));
+			o.L(std::format("  stage {} | running {} | starting {} | stopping {} | completed {} | failed {} | active in journal {} | already run {} | type {} | flags {:04X}", q->GetCurrentStageID(),
+				q->IsEnabled(), q->IsStarting(), q->IsStopping(), q->IsCompleted(), q->data.flags.all(RE::QuestFlag::kFailed), q->IsActive(), q->alreadyRun,
+				static_cast<int>(q->GetType()), static_cast<std::uint16_t>(q->data.flags.underlying())));
 			for (auto obj : q->objectives) {
 				if (obj) {
 					o.L(std::format("  objective {:>4}  {:<18} {}", obj->index, ObjState(obj->state.get()), obj->displayText.c_str() ? obj->displayText.c_str() : ""));

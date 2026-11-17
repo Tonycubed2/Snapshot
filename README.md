@@ -1,6 +1,16 @@
 # Snapshot
 
-An SKSE plugin for Skyrim SE/AE by tonycubed2.
+A troubleshooting snapshot for bug reports, by tonycubed2: hold L for 8 seconds in game and it writes a report of the game's state and copies the newest saves and all logs. This folder is the Skyrim SE/AE version (SKSE).
+
+## Other games
+
+| Folder | Game | Built with |
+|---|---|---|
+| [skyrimle/](skyrimle) | Skyrim Legendary Edition 1.9.32.0 (SKSE 1.7.3, 32-bit) | CMake; needs SKSE 1.7.3's source in `extern\skse` (not included here) |
+| [fallout4/](fallout4) | Fallout 4 1.11.x (F4SE) | xmake; needs [CommonLibF4](https://github.com/libxse/commonlibf4) in `lib\commonlibf4` (not included here) |
+| [starfield/](starfield) | Starfield 1.16.244 (SFSE) | xmake; needs [CommonLibSF](https://github.com/libxse/commonlibsf) in `lib\commonlibsf` (not included here) |
+
+Each folder's README.txt lists what that game's report contains and anything it cannot include.
 
 Troubleshooting snapshot for bug reports. Hold L for 8 seconds in game; when it is done a message box
 says "Data Collected" and shows the folder it wrote.
