@@ -1,13 +1,15 @@
 // Snapshot - hold a key (default L) for 8 seconds in game and it writes a full troubleshooting
 // snapshot: running quests, player stats, every NPC's factions, nearby NPCs with their AI packages,
 // followers, load order, SKSE plugins, plus copies of the last 3 saves and all logs.
+// 1.1.0: Progress Journal (Journal.cpp) - a crash-safe running record of progress, with restore in F1 > Snapshot.
+#include "Journal.h"
 #include <filesystem>
 #include <map>
 #include <numbers>
 #include <set>
 
 SKSEPluginInfo(
-	.Version = REL::Version{ 1, 0, 0, 0 },
+	.Version = REL::Version{ 1, 1, 0, 0 },
 	.Name = "Snapshot"sv,
 	.Author = "tonycubed2"sv,
 	.StructCompatibility = SKSE::StructCompatibility::Independent,
@@ -36,6 +38,7 @@ namespace
 		GetPrivateProfileStringA("General", "fOutdoorRadius", "10000", buf, sizeof(buf), ini.c_str());
 		g_radius = std::strtof(buf, nullptr);
 		logger::info("Settings: key {} hold {}s saves {} radius {}", g_key, g_holdSecs, g_saves, g_radius);
+		Journal::LoadSettings(ini);
 	}
 
 	void ShowNotification(const char* a_text)
@@ -260,7 +263,7 @@ namespace
 
 		SYSTEMTIME t{};
 		GetLocalTime(&t);
-		o.L("Snapshot 1.0.0 troubleshooting report");
+		o.L("Snapshot 1.1.0 troubleshooting report");
 		o.L(std::format("Taken {:04}-{:02}-{:02} {:02}:{:02}:{:02}   game runtime {}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, REL::Module::get().version().string()));
 		if (const auto cal = RE::Calendar::GetSingleton()) {
 			char buf[256]{};
@@ -546,6 +549,7 @@ namespace
 
 	void OnMessage(SKSE::MessagingInterface::Message* a_msg)
 	{
+		Journal::OnMessage(a_msg);
 		if (a_msg->type == SKSE::MessagingInterface::kInputLoaded) {
 			static InputSink sink;
 			if (const auto mgr = RE::BSInputDeviceManager::GetSingleton()) {
@@ -559,7 +563,7 @@ namespace
 SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
 	SKSE::Init(a_skse);
-	logger::info("Snapshot 1.0.0 loading; game runtime {}", REL::Module::get().version().string());
+	logger::info("Snapshot 1.1.0 loading; game runtime {}", REL::Module::get().version().string());
 	LoadSettings();
 	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
 	return true;
