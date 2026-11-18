@@ -2,6 +2,7 @@
 // snapshot: running quests, player stats, every NPC's factions, nearby NPCs with their AI packages,
 // followers, load order, SKSE plugins, plus copies of the last 3 saves and all logs.
 // 1.1.0: Progress Journal (Journal.cpp) - a crash-safe running record of progress, with restore in F1 > Snapshot.
+// 1.1.1: quest stages are replayed one by one in the order they happened (every stage's script runs).
 #include "Journal.h"
 #include <filesystem>
 #include <map>
@@ -9,7 +10,7 @@
 #include <set>
 
 SKSEPluginInfo(
-	.Version = REL::Version{ 1, 1, 0, 0 },
+	.Version = REL::Version{ 1, 1, 1, 0 },
 	.Name = "Snapshot"sv,
 	.Author = "tonycubed2"sv,
 	.StructCompatibility = SKSE::StructCompatibility::Independent,
@@ -263,7 +264,7 @@ namespace
 
 		SYSTEMTIME t{};
 		GetLocalTime(&t);
-		o.L("Snapshot 1.1.0 troubleshooting report");
+		o.L("Snapshot 1.1.1 troubleshooting report");
 		o.L(std::format("Taken {:04}-{:02}-{:02} {:02}:{:02}:{:02}   game runtime {}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, REL::Module::get().version().string()));
 		if (const auto cal = RE::Calendar::GetSingleton()) {
 			char buf[256]{};
@@ -563,7 +564,7 @@ namespace
 SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
 	SKSE::Init(a_skse);
-	logger::info("Snapshot 1.1.0 loading; game runtime {}", REL::Module::get().version().string());
+	logger::info("Snapshot 1.1.1 loading; game runtime {}", REL::Module::get().version().string());
 	LoadSettings();
 	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
 	return true;

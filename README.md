@@ -29,7 +29,9 @@ When you load a save and the journal holds progress made after it that was never
 quit without saving), a message box says so. Open **F1 > Snapshot > Progress Journal**, tick what you
 want, and press **Restore selected**:
   - items and gold are added / removed again
-  - quest stages are advanced with the quest's own SetStage (never moved back)
+  - quest stages are replayed one by one, in the order they happened, with the quest's own SetStage,
+    so every stage's script runs (quests it starts, items it gives, changes it makes); stages already
+    done are skipped, and items a stage's script gave are not added twice
   - skills, level, XP, perk points and health/magicka/stamina are raised to the recorded values
   - perks and spells are added again
   - you, and each follower, are moved back to where you were

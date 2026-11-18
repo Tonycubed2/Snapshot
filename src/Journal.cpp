@@ -6,7 +6,9 @@
 // (the game crashed, or you quit without saving), a message box says so and F1 > Snapshot > Progress Journal
 // offers to put it back:
 //   - items and gold gained or lost         (added / removed again)
-//   - quest stages reached                  (advanced through the quest's own SetStage, never moved back)
+//   - quest stages reached                  (replayed one by one, in the order they happened, through the quest's own
+//                                             SetStage, so every stage's script runs: quests it starts, items it gives,
+//                                             world changes it makes. Stages already done are skipped.)
 //   - skills, skill XP, level, level XP, perk points, health/magicka/stamina   (raised to the recorded values)
 //   - perks taken, spells learned           (added again)
 //   - where you stood, and where each follower stood   (moved back there)
@@ -337,7 +339,9 @@ namespace Journal
 					(a_event->newContainer == 0x14 || a_event->oldContainer == 0x14) && a_event->baseObj < 0xFF000000) {
 					const auto item = RE::TESForm::LookupByID(a_event->baseObj);
 					const int  delta = a_event->newContainer == 0x14 ? a_event->itemCount : -a_event->itemCount;
-					Write("ITEM", std::format("{}\t{}\t{}", Ref(item), delta, NameOf(item)));
+					// "given": appeared in the inventory from nowhere (not picked up, not from a container) - a script gave it
+					const char* source = a_event->newContainer != 0x14 ? "lost" : a_event->oldContainer != 0 ? "container" : a_event->reference ? "world" : "given";
+					Write("ITEM", std::format("{}\t{}\t{}\t{}", Ref(item), delta, NameOf(item), source));
 				}
 				return RE::BSEventNotifyControl::kContinue;
 			}
@@ -409,7 +413,9 @@ namespace Journal
 			std::string                                   save;
 			std::size_t                                   lines = 0;
 			std::map<std::string, std::pair<int, std::string>> items;  // ref -> (net count, name)
-			std::vector<std::pair<std::string, int>>      stageOrder;  // quest ref, highest stage (first-seen order)
+			std::vector<std::pair<std::string, int>>      stageOrder;  // quest ref, highest stage (first-seen order) - for the menu
+			std::vector<std::pair<std::string, int>>      stageEvents; // every stage reached, in the order it happened - replayed
+			std::map<std::string, std::pair<int, std::string>> stageItems;  // items a script gave right after a stage (come back with the replay)
 			std::map<std::string, std::string>            stageNames;
 			std::vector<std::string>                      skills;      // last SKILLS fields (after the type)
 			std::map<std::string, std::string>            perks, spells;
@@ -428,6 +434,7 @@ namespace Journal
 		Pending    g_pending;
 		bool       g_hasPending = false;
 		std::string g_lastResult;
+		std::string g_replayStatus;  // quest stage replay progress (under g_pendingLock)
 		bool g_doItems = true, g_doStages = true, g_doSkills = true, g_doPerks = true, g_doSpells = true, g_doPos = true, g_doFollowers = true;
 
 		// Reads the journal and collects what happened after the checkpoint for a_save (its last SAVE or LOAD line)
@@ -459,6 +466,14 @@ namespace Journal
 			if (checkpoint < 0) {
 				return p;
 			}
+			auto seconds = [](const std::string& a_clock) -> long long {
+				int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
+				if (std::sscanf(a_clock.c_str(), "%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &s) != 6) {
+					return 0;
+				}
+				return ((static_cast<long long>(y) * 372 + mo * 31 + d) * 86400LL) + h * 3600LL + mi * 60LL + s;
+			};
+			long long lastStage = -1000000;
 			for (std::size_t i = static_cast<std::size_t>(checkpoint) + 1; i < lines.size(); ++i) {
 				const auto f = Split(lines[i]);
 				if (f.size() < 2) {
@@ -473,8 +488,11 @@ namespace Journal
 				}
 				++p.lines;
 				if (type == "ITEM" && f.size() >= 5) {
-					auto& e = p.items[f[2]];
-					e.first += std::atoi(f[3].c_str());
+					const int delta = std::atoi(f[3].c_str());
+					// given by a script within 5 s of a stage: that stage's replay gives it again, so it is kept apart
+					const bool fromStage = f.size() >= 6 && f[5] == "given" && delta > 0 && seconds(f[0]) - lastStage <= 5;
+					auto&      e = fromStage ? p.stageItems[f[2]] : p.items[f[2]];
+					e.first += delta;
 					e.second = f[4];
 				} else if (type == "STAGE" && f.size() >= 5) {
 					const int stage = std::atoi(f[3].c_str());
@@ -485,6 +503,8 @@ namespace Journal
 						it->second = std::max(it->second, stage);
 					}
 					p.stageNames[f[2]] = f[4];
+					p.stageEvents.emplace_back(f[2], stage);
+					lastStage = seconds(f[0]);
 				} else if (type == "SKILLS") {
 					p.skills.assign(f.begin() + 2, f.end());
 				} else if (type == "PERK" && f.size() >= 4) {
@@ -515,6 +535,87 @@ namespace Journal
 			return p;
 		}
 
+		// ---------------------------------------------------------------- quest stage replay, one stage at a time
+		struct StageRun
+		{
+			std::vector<std::pair<std::string, int>> events;
+			std::size_t                              next = 0;
+			int                                      run = 0, skipped = 0;
+		};
+
+		void RunNextStage(std::shared_ptr<StageRun> a_run);
+
+		// called by Papyrus when SetStage returned; the next stage waits a moment so this stage's script gets to run first
+		class NextStage : public RE::BSScript::IStackCallbackFunctor
+		{
+		public:
+			explicit NextStage(std::shared_ptr<StageRun> a_run) :
+				_run(std::move(a_run)) {}
+			void operator()(RE::BSScript::Variable) override
+			{
+				auto run = _run;
+				std::thread([run]() {
+					std::this_thread::sleep_for(std::chrono::milliseconds(750));
+					if (const auto tasks = SKSE::GetTaskInterface()) {
+						tasks->AddTask([run]() { RunNextStage(run); });
+					}
+				}).detach();
+			}
+			void SetObject(const RE::BSTSmartPointer<RE::BSScript::Object>&) override {}
+
+		private:
+			std::shared_ptr<StageRun> _run;
+		};
+
+		bool StageDone(RE::TESQuest* a_quest, int a_stage)
+		{
+			if (a_quest->GetCurrentStageID() == a_stage) {
+				return true;
+			}
+			if (a_quest->executedStages) {
+				for (auto& s : *a_quest->executedStages) {
+					if (s.data.index == a_stage) {
+						return true;
+					}
+				}
+			}
+			return false;
+		}
+
+		// main thread
+		void RunNextStage(std::shared_ptr<StageRun> a_run)
+		{
+			const auto vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
+			const auto policy = vm ? vm->GetObjectHandlePolicy() : nullptr;
+			while (a_run->next < a_run->events.size()) {
+				const auto [ref, stage] = a_run->events[a_run->next++];
+				const auto form = Resolve(ref);
+				const auto quest = form ? form->As<RE::TESQuest>() : nullptr;
+				if (!quest || !policy || StageDone(quest, stage)) {
+					++a_run->skipped;
+					continue;
+				}
+				const auto handle = policy->GetHandleForObject(RE::TESQuest::FORMTYPE, quest);
+				RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback{ new NextStage(a_run) };
+				std::unique_ptr<RE::BSScript::IFunctionArguments> args{ RE::MakeFunctionArguments(static_cast<std::int32_t>(stage)) };
+				if (vm->DispatchMethodCall(handle, RE::BSFixedString{ "Quest" }, RE::BSFixedString{ "SetStage" }, args.get(), callback)) {
+					++a_run->run;
+					{
+						std::scoped_lock l{ g_pendingLock };
+						g_replayStatus = std::format("Quest replay: stage {} of {} ({} stage {})", a_run->next, a_run->events.size(), NameOf(quest), stage);
+					}
+					logger::info("Progress Journal: replaying {} stage {}", NameOf(quest), stage);
+					return;  // NextStage continues the chain
+				}
+				++a_run->skipped;
+			}
+			const auto done = std::format("Quest replay finished: {} stages run, {} already done or not found", a_run->run, a_run->skipped);
+			Write("REPLAYED", done);
+			logger::info("Progress Journal: {}", done);
+			std::scoped_lock l{ g_pendingLock };
+			g_replayStatus = done;
+		}
+
 		void MoveActor(RE::Actor* a_actor, const PosEntry& a_pos)
 		{
 			const auto cell = Resolve(a_pos.cell);
@@ -543,7 +644,14 @@ namespace Journal
 			bool skills = false;
 
 			if (g_doItems) {
-				for (auto& [ref, e] : p.items) {
+				auto all = p.items;
+				if (!g_doStages) {  // the stage replay would have given these; without it they are added like any item
+					for (auto& [ref, e] : p.stageItems) {
+						all[ref].first += e.first;
+						all[ref].second = e.second;
+					}
+				}
+				for (auto& [ref, e] : all) {
 					const auto form = Resolve(ref);
 					const auto obj = form ? form->As<RE::TESBoundObject>() : nullptr;
 					if (!obj) {
@@ -621,22 +729,11 @@ namespace Journal
 					}
 				}
 			}
-			if (g_doStages) {
-				const auto vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
-				const auto policy = vm ? vm->GetObjectHandlePolicy() : nullptr;
-				for (auto& [ref, stage] : p.stageOrder) {
-					const auto form = Resolve(ref);
-					const auto quest = form ? form->As<RE::TESQuest>() : nullptr;
-					if (!quest || !policy || quest->GetCurrentStageID() >= stage) {
-						continue;
-					}
-					const auto handle = policy->GetHandleForObject(RE::TESQuest::FORMTYPE, quest);
-					RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback;
-					std::unique_ptr<RE::BSScript::IFunctionArguments> args{ RE::MakeFunctionArguments(static_cast<std::int32_t>(stage)) };
-					if (vm->DispatchMethodCall(handle, RE::BSFixedString{ "Quest" }, RE::BSFixedString{ "SetStage" }, args.get(), callback)) {
-						++stages;
-					}
-				}
+			if (g_doStages && !p.stageEvents.empty()) {
+				auto run = std::make_shared<StageRun>();
+				run->events = p.stageEvents;
+				RunNextStage(run);  // one by one, each after the previous SetStage returned
+				stages = static_cast<int>(p.stageEvents.size());
 			}
 			if (g_doFollowers) {
 				for (auto& [who, pos] : p.followerPos) {
@@ -651,7 +748,7 @@ namespace Journal
 				MoveActor(player, p.playerPos);
 				++moved;
 			}
-			const auto result = std::format("Restored: {} items, {} quest stages, skills {}, {} perks, {} spells, {} moved (player/followers)", items, stages,
+			const auto result = std::format("Restored: {} items, {} quest stages queued for replay (one by one), skills {}, {} perks, {} spells, {} moved (player/followers)", items, stages,
 				skills ? "raised" : "unchanged", perks, spells, moved);
 			Write("RESTORED", result);
 			logger::info("Progress Journal: {}", result);
@@ -679,6 +776,9 @@ namespace Journal
 			ImGuiMCP::Separator();
 			if (!g_lastResult.empty()) {
 				ImGuiMCP::TextUnformatted(g_lastResult.c_str());
+				if (!g_replayStatus.empty()) {
+					ImGuiMCP::TextUnformatted(g_replayStatus.c_str());
+				}
 				ImGuiMCP::Separator();
 			}
 			if (!g_hasPending) {
@@ -697,11 +797,18 @@ namespace Journal
 			ShowList("", list);
 
 			list.clear();
-			for (auto& [ref, stage] : p.stageOrder) {
-				list.push_back(std::format("{} -> stage {}", p.stageNames.at(ref), stage));
+			for (auto& [ref, stage] : p.stageEvents) {
+				list.push_back(std::format("{} - stage {}", p.stageNames.at(ref), stage));
 			}
-			ImGuiMCP::Checkbox(std::format("Quest stages ({})", p.stageOrder.size()).c_str(), &g_doStages);
+			ImGuiMCP::Checkbox(std::format("Quest stages ({} stages in {} quests, replayed one by one in this order)", p.stageEvents.size(), p.stageOrder.size()).c_str(), &g_doStages);
 			ShowList("", list);
+			if (!p.stageItems.empty()) {
+				list.clear();
+				for (auto& [ref, e] : p.stageItems) {
+					list.push_back(std::format("{:+} {}", e.first, e.second));
+				}
+				ShowList("      Given by those stages' scripts (the replay gives them again; added as items only if quest stages are not ticked):", list);
+			}
 
 			ImGuiMCP::Checkbox(p.skills.empty() ? "Skills and level (no change recorded)" : std::format("Skills and level (level {} recorded)", p.skills[0]).c_str(), &g_doSkills);
 
